@@ -2,7 +2,6 @@ using AutoMapper;
 using EcommerceWeb.Api.Data;
 using EcommerceWeb.Api.Mappings;
 using EcommerceWeb.Api.Middlewares;
-using EcommerceWeb.Api.Model.DTO;
 using EcommerceWeb.Api.Repositories;
 using EcommerceWeb.Api.Repositories.Interface;
 using EcommerceWeb.Api.Service;
@@ -10,11 +9,9 @@ using FluentValidation;
 using FluentValidation.AspNetCore;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
-using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
-using NZWalks.API.Repositories;
 using Stripe;
 using System.Text;
 using System.Text.Json;
@@ -22,25 +19,19 @@ using System.Text.Json.Serialization;
 
 var builder = WebApplication.CreateBuilder(args);
 
-
-// In ConfigureServices method:
-var MyAllowSpecificOrigins = "_myAllowSpecificOrigins";
+// ===== CORS =====
+const string MyAllowSpecificOrigins = "_myAllowSpecificOrigins";
 builder.Services.AddCors(options =>
 {
-    options.AddPolicy("_myAllowSpecificOrigins", policy =>
+    options.AddPolicy(MyAllowSpecificOrigins, policy =>
     {
-        policy.WithOrigins(
-            "http://localhost:5173",
-            "https://localhost:5173"
-        )
-        .AllowAnyHeader()
-        .AllowAnyMethod();
+        policy.WithOrigins("http://localhost:5173", "https://localhost:5173")
+              .AllowAnyHeader()
+              .AllowAnyMethod();
     });
 });
 
-
-
-// Add services to the container
+// ===== Controllers & Validation =====
 builder.Services.AddControllers()
     .AddFluentValidation()
     .AddJsonOptions(options =>
@@ -51,11 +42,11 @@ builder.Services.AddControllers()
 
 builder.Services.AddValidatorsFromAssemblyContaining<RegisterRequestDtoValidator>();
 
-// Swagger + JWT Setup
+// ===== Swagger =====
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
-    c.SwaggerDoc("v1", new() { Title = "NZWalks API", Version = "v1" });
+    c.SwaggerDoc("v1", new() { Title = "EcommerceWeb API", Version = "v1" });
 
     c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
     {
@@ -79,14 +70,13 @@ builder.Services.AddSwaggerGen(c =>
     });
 });
 
-// AutoMapper
+// ===== AutoMapper =====
 builder.Services.AddAutoMapper(cfg => cfg.AddProfile<MappingProfile>());
 
-builder.Services.AddScoped<IPaymentService, PaymentService>();
+// ===== Stripe =====
 StripeConfiguration.ApiKey = builder.Configuration["Stripe:SecretKey"];
 
-
-// Database + Identity
+// ===== Database & Identity =====
 builder.Services.AddDbContext<ApplicationDbContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
 
@@ -103,11 +93,10 @@ builder.Services.Configure<IdentityOptions>(options =>
     options.Password.RequireUppercase = false;
     options.Password.RequiredLength = 6;
     options.Password.RequiredUniqueChars = 1;
-
     options.SignIn.RequireConfirmedEmail = true;
 });
 
-// JWT Authentication
+// ===== Authentication (JWT) =====
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
@@ -125,40 +114,34 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 
         options.Events = new JwtBearerEvents
         {
-            // 401 Unauthorized (e.g. not logged in or invalid token)
             OnChallenge = context =>
             {
-                context.HandleResponse(); // Suppress default response
+                context.HandleResponse();
                 context.Response.StatusCode = 401;
                 context.Response.ContentType = "application/json";
-
-                var result = System.Text.Json.JsonSerializer.Serialize(new
+                var result = JsonSerializer.Serialize(new
                 {
                     success = false,
                     message = "You are not authorized."
                 });
-
                 return context.Response.WriteAsync(result);
             },
-
-            // 403 Forbidden (e.g. logged in but missing required role)
             OnForbidden = context =>
             {
                 context.Response.StatusCode = 403;
                 context.Response.ContentType = "application/json";
-
-                var result = System.Text.Json.JsonSerializer.Serialize(new
+                var result = JsonSerializer.Serialize(new
                 {
                     success = false,
                     message = "You do not have permission to access this resource."
                 });
-
                 return context.Response.WriteAsync(result);
             }
         };
     });
 
-// Repositories
+// ===== Repositories & Services =====
+builder.Services.AddScoped<IPaymentService, PaymentService>();
 builder.Services.AddScoped<IProductRepository, ProductRepository>();
 builder.Services.AddScoped<ITokenRepository, TokenRepository>();
 builder.Services.AddScoped<IUserRepository, UserRepository>();
@@ -166,34 +149,34 @@ builder.Services.AddScoped<ICartRepository, CartRepository>();
 builder.Services.AddScoped<IReviewRepository, ReviewRepository>();
 builder.Services.AddTransient<IEmailSender, EmailSender>();
 
-
-// Suppress automatic model validation (we handle it ourselves)
+// ===== Suppress automatic model validation =====
 builder.Services.Configure<ApiBehaviorOptions>(options =>
 {
     options.SuppressModelStateInvalidFilter = true;
 });
 
+// ===== Build App =====
 var app = builder.Build();
 
+// ===== Middleware Pipeline =====
 
-// Development Swagger UI
-if (app.Environment.IsDevelopment())
+if (app.Environment.IsDevelopment() || builder.Configuration.GetValue<bool>("Swagger:Enabled"))
 {
     app.UseSwagger();
-    app.UseSwaggerUI();
+    app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "EcommerceWeb API v1"));
 }
+
+// Explicit root and health endpoints (to avoid 404 on / and /health)
+app.MapGet("/", () => Results.Ok(new { message = "EcommerceWeb API is running!" }));
+app.MapGet("/health", () => Results.Ok(new { status = "Healthy", timestamp = DateTime.UtcNow }));
 
 app.UseHttpsRedirection();
 
-// Check for valid content-type
+// Enforce JSON content-type for write operations
 app.Use(async (context, next) =>
 {
     var method = context.Request.Method;
-
-    // Only enforce JSON header for methods that carry a request body
-    if ((HttpMethods.IsPost(method) ||
-         HttpMethods.IsPut(method) ||
-         HttpMethods.IsPatch(method))
+    if ((HttpMethods.IsPost(method) || HttpMethods.IsPut(method) || HttpMethods.IsPatch(method))
         && !context.Request.HasJsonContentType())
     {
         context.Response.StatusCode = 400;
@@ -204,17 +187,17 @@ app.Use(async (context, next) =>
         });
         return;
     }
-
-    await next.Invoke();
+    await next();
 });
 
-
-// Custom global exception handler
 app.UseMiddleware<ExceptionHandlerMiddleware>();
 
 app.UseAuthentication();
 app.UseAuthorization();
 
+// MUST come after UseAuthentication/Authorization
 app.MapControllers();
-app.UseCors("_myAllowSpecificOrigins");
+
+app.UseCors(MyAllowSpecificOrigins);
+
 app.Run();
